@@ -75,6 +75,20 @@ DG_ENABLED=1 DG_ETA=0.5 RUN_NAME=gsm8k_dg_eta0p5_seed42_screen MAX_STEPS=8 VAL_P
   bash tools/run_dg_gsm8k_full.sh
 ```
 
+For the longer head-to-head we want to hand to a colleague on a larger node:
+
+```bash
+DG_ETA_MAIN=0.5 \
+MAX_STEPS=128 \
+CLUSTER_GPUS_PER_NODE=8 \
+TRAIN_GLOBAL_BATCH_SIZE=512 \
+TRAIN_MICRO_BATCH_SIZE=4 \
+LOGPROB_BATCH_SIZE=4 \
+MAX_TOTAL_SEQUENCE_LENGTH=768 \
+MAX_NEW_TOKENS=384 \
+bash tools/run_dg_gsm8k_long_compare.sh
+```
+
 Plot:
 
 ```bash

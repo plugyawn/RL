@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONFIG_PATH="${CONFIG_PATH:-examples/configs/grpo_math_1B.yaml}"
 
 export HF_HOME="${HF_HOME:-$ROOT_DIR/.hf-cache}"
 export PYTHONUNBUFFERED=1
@@ -20,6 +21,15 @@ SEED="${SEED:-42}"
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-Math-1.5B-Instruct}"
 TOKENIZER_NAME="${TOKENIZER_NAME:-$MODEL_NAME}"
 PROMPT_FILE="${PROMPT_FILE:-examples/prompts/cot.txt}"
+CLUSTER_GPUS_PER_NODE="${CLUSTER_GPUS_PER_NODE:-1}"
+CLUSTER_NUM_NODES="${CLUSTER_NUM_NODES:-1}"
+DTENSOR_V2="${DTENSOR_V2:-0}"
+CHECKPOINTING_ENABLED="${CHECKPOINTING_ENABLED:-0}"
+CHECKPOINT_KEEP_TOP_K="${CHECKPOINT_KEEP_TOP_K:-1}"
+MODEL_SAVE_FORMAT="${MODEL_SAVE_FORMAT:-null}"
+WANDB_ENABLED="${WANDB_ENABLED:-0}"
+WANDB_PROJECT="${WANDB_PROJECT:-dg-grpo}"
+WANDB_NAME="${WANDB_NAME:-}"
 
 # "Full" here means "single A100 sized" rather than paper-scale.
 MAX_STEPS="${MAX_STEPS:-128}"
@@ -48,6 +58,7 @@ mkdir -p "$RUN_DIR"
 
 CMD=(
   "${UV_RUN[@]}" examples/run_grpo.py
+  "--config" "${CONFIG_PATH}"
   "logger.log_dir=${RUN_DIR}/logs"
   "checkpointing.checkpoint_dir=${RUN_DIR}/checkpoints"
   "grpo.max_num_steps=${MAX_STEPS}"
@@ -66,27 +77,37 @@ CMD=(
   "policy.tokenizer.name=${TOKENIZER_NAME}"
   "policy.generation.max_new_tokens=${MAX_NEW_TOKENS}"
   "policy.generation.vllm_cfg.enable_vllm_metrics_logger=false"
-  "checkpointing.enabled=false"
-  "checkpointing.keep_top_k=1"
+  "checkpointing.enabled=${CHECKPOINTING_ENABLED}"
+  "checkpointing.keep_top_k=${CHECKPOINT_KEEP_TOP_K}"
   "checkpointing.save_period=${SAVE_PERIOD}"
   "data.train.split_validation_size=0.01"
   "data.num_workers=1"
   "env.math.num_workers=${MATH_NUM_WORKERS}"
   "logger.tensorboard_enabled=true"
-  "logger.wandb_enabled=false"
+  "logger.wandb_enabled=${WANDB_ENABLED}"
   "logger.mlflow_enabled=false"
   "logger.swanlab_enabled=false"
   "logger.monitor_gpus=true"
   "logger.num_val_samples_to_print=0"
   "data.default.prompt_file=${PROMPT_FILE}"
-  "policy.dtensor_cfg._v2=false"
-  "checkpointing.model_save_format=null"
+  "cluster.gpus_per_node=${CLUSTER_GPUS_PER_NODE}"
+  "cluster.num_nodes=${CLUSTER_NUM_NODES}"
   "data.train.dataset_name=gsm8k"
   "+data.train.split=train"
   "++data.validation.dataset_name=gsm8k"
   "++data.validation.split=test"
   "loss_fn.dg_enabled=${DG_ENABLED}"
 )
+
+if [[ -n "$WANDB_NAME" ]]; then
+  CMD+=("logger.wandb.name=${WANDB_NAME}")
+fi
+CMD+=("logger.wandb.project=${WANDB_PROJECT}")
+
+if [[ "$DTENSOR_V2" == "0" ]]; then
+  CMD+=("policy.dtensor_cfg._v2=false")
+  CMD+=("checkpointing.model_save_format=${MODEL_SAVE_FORMAT}")
+fi
 
 if [[ "$DG_ENABLED" == "1" ]]; then
   CMD+=("loss_fn.dg_eta=${DG_ETA}")
