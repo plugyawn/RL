@@ -10,6 +10,10 @@
 </div>
 
 ## 📣 News
+* [03/28/2026] Delightful GRPO research track
+    * Added a DG-GRPO fork path for `grpo_math_1B.yaml` with `loss_fn.dg_enabled` and `loss_fn.dg_eta`.
+    * Added a reproducible GSM8K launcher: [tools/run_dg_gsm8k_full.sh](/tools/run_dg_gsm8k_full.sh)
+    * Added screening artifacts and rollout-stability notes: [research/dg_gsm8k_screen_20260328](research/dg_gsm8k_screen_20260328)
 * [03/12/2026] GDPO Support
     * Enabling [Group reward-Decoupled Normalization Policy Optimization](https://arxiv.org/abs/2601.05242) (GDPO) for multi-reward RL training is now supported.
     * Example: [gdpo_math_1B.yaml](/examples/configs/gdpo_math_1B.yaml)
