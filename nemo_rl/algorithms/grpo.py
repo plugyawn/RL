@@ -1908,13 +1908,27 @@ def grpo_train(
 
                 metrics.update(train_results["all_mb_metrics"])
                 metrics.update(gen_step_metrics)
+                dg_mean_metrics = {
+                    "dg_enabled",
+                    "dg_eta",
+                    "dg_gate_mean",
+                    "dg_gate_std",
+                    "dg_gate_positive_mean",
+                    "dg_gate_negative_mean",
+                    "dg_gate_spread",
+                    "dg_surprisal_mean",
+                }
                 for k, v in metrics.items():
                     if k in {"probs_ratio_min", "probs_ratio_clamped_min"}:
                         valid_values = [x for x in v if not np.isinf(x)]
                         metrics[k] = (
                             np.min(valid_values).item() if valid_values else -1.0
                         )
-                    elif k in {"probs_ratio_max", "probs_ratio_clamped_max"}:
+                    elif k in {
+                        "probs_ratio_max",
+                        "probs_ratio_clamped_max",
+                        "dg_surprisal_max",
+                    }:
                         valid_values = [x for x in v if not np.isinf(x)]
                         metrics[k] = (
                             np.max(valid_values).item() if valid_values else -1.0
@@ -1927,10 +1941,12 @@ def grpo_train(
                         "global_valid_seqs",
                         "global_valid_toks",
                         "mean_prompt_length",
-                    }:
+                    } | dg_mean_metrics:
                         metrics[k] = np.mean(v).item()
                     elif isinstance(v, (np.ndarray, list)):
                         metrics[k] = np.sum(v).item()
+                    elif np.isscalar(v):
+                        metrics[k] = float(v)
                     else:
                         print(f"Skipping aggregation for {k} ({type(v)})")
 
@@ -2956,13 +2972,27 @@ def async_grpo_train(
                         {f"moe/{k}": v for k, v in train_results["moe_metrics"].items()}
                     )
                 metrics.update(train_results["all_mb_metrics"])
+                dg_mean_metrics = {
+                    "dg_enabled",
+                    "dg_eta",
+                    "dg_gate_mean",
+                    "dg_gate_std",
+                    "dg_gate_positive_mean",
+                    "dg_gate_negative_mean",
+                    "dg_gate_spread",
+                    "dg_surprisal_mean",
+                }
                 for k, v in metrics.items():
                     if k in {"probs_ratio_min", "probs_ratio_clamped_min"}:
                         valid_values = [x for x in v if not np.isinf(x)]
                         metrics[k] = (
                             np.min(valid_values).item() if valid_values else -1.0
                         )
-                    elif k in {"probs_ratio_max", "probs_ratio_clamped_max"}:
+                    elif k in {
+                        "probs_ratio_max",
+                        "probs_ratio_clamped_max",
+                        "dg_surprisal_max",
+                    }:
                         valid_values = [x for x in v if not np.isinf(x)]
                         metrics[k] = (
                             np.max(valid_values).item() if valid_values else -1.0
@@ -2974,8 +3004,10 @@ def async_grpo_train(
                         "global_valid_seqs",
                         "global_valid_toks",
                         "mean_prompt_length",
-                    }:
+                    } | dg_mean_metrics:
                         metrics[k] = np.mean(v).item()
+                    elif np.isscalar(v):
+                        metrics[k] = float(v)
                     else:
                         metrics[k] = np.sum(v).item()
                 metrics.update(rollout_metrics)
