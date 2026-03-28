@@ -1,0 +1,224 @@
+{
+  "baseline": {
+    "validation/accuracy": {
+      "final_step": 8,
+      "final_value": 0.34375,
+      "best_step": 4,
+      "best_value": 0.375
+    },
+    "train/reward": {
+      "final_step": 8,
+      "final_value": 0.5,
+      "best_step": 4,
+      "best_value": 0.78125
+    },
+    "train/loss": {
+      "final_step": 8,
+      "final_value": 0.0063935015350580215,
+      "best_step": 7,
+      "best_value": 0.039194416254758835
+    },
+    "train/baseline_reward/pct_1": {
+      "final_step": 8,
+      "final_value": 25.0,
+      "best_step": 2,
+      "best_value": 50.0
+    },
+    "train/advantages/mean": {
+      "final_step": 8,
+      "final_value": -0.00629122881218791,
+      "best_step": 4,
+      "best_value": 0.10378216207027435
+    },
+    "train/dg_gate_mean": {
+      "final_step": 8,
+      "final_value": 1.0,
+      "best_step": 1,
+      "best_value": 1.0
+    },
+    "train/dg_gate_positive_mean": {
+      "final_step": 8,
+      "final_value": 1.0,
+      "best_step": 1,
+      "best_value": 1.0
+    },
+    "train/dg_gate_negative_mean": {
+      "final_step": 8,
+      "final_value": 1.0,
+      "best_step": 1,
+      "best_value": 1.0
+    },
+    "train/dg_gate_spread": {
+      "final_step": 8,
+      "final_value": 0.0,
+      "best_step": 1,
+      "best_value": 0.0
+    },
+    "train/dg_surprisal_mean": {
+      "final_step": 8,
+      "final_value": 0.3501189649105072,
+      "best_step": 8,
+      "best_value": 0.3501189649105072
+    },
+    "train/dg_surprisal_max": {
+      "final_step": 8,
+      "final_value": 16.77435302734375,
+      "best_step": 5,
+      "best_value": 17.763813018798828
+    },
+    "timing/train/total_step_time": {
+      "final_step": 8,
+      "final_value": 54.48291015625,
+      "best_step": 8,
+      "best_value": 54.48291015625
+    }
+  },
+  "dg_eta1p0": {
+    "validation/accuracy": {
+      "final_step": 8,
+      "final_value": 0.3125,
+      "best_step": 4,
+      "best_value": 0.328125
+    },
+    "train/reward": {
+      "final_step": 8,
+      "final_value": 0.5,
+      "best_step": 4,
+      "best_value": 0.84375
+    },
+    "train/loss": {
+      "final_step": 8,
+      "final_value": -0.014194701798260212,
+      "best_step": 7,
+      "best_value": 0.04310974106192589
+    },
+    "train/baseline_reward/pct_1": {
+      "final_step": 8,
+      "final_value": 25.0,
+      "best_step": 4,
+      "best_value": 53.125
+    },
+    "train/advantages/mean": {
+      "final_step": 8,
+      "final_value": 5.775731448665056e-09,
+      "best_step": 1,
+      "best_value": 0.0911903828382492
+    },
+    "train/dg_gate_mean": {
+      "final_step": 8,
+      "final_value": 0.4982631504535675,
+      "best_step": 1,
+      "best_value": 0.5042545795440674
+    },
+    "train/dg_gate_positive_mean": {
+      "final_step": 8,
+      "final_value": 0.4982631504535675,
+      "best_step": 1,
+      "best_value": 0.5042545795440674
+    },
+    "train/dg_gate_negative_mean": {
+      "final_step": 8,
+      "final_value": 0.4982631504535675,
+      "best_step": 1,
+      "best_value": 0.5042545795440674
+    },
+    "train/dg_gate_spread": {
+      "final_step": 8,
+      "final_value": 0.0,
+      "best_step": 1,
+      "best_value": 0.0
+    },
+    "train/dg_surprisal_mean": {
+      "final_step": 8,
+      "final_value": 0.23264390230178833,
+      "best_step": 8,
+      "best_value": 0.23264390230178833
+    },
+    "train/dg_surprisal_max": {
+      "final_step": 8,
+      "final_value": 17.234085083007812,
+      "best_step": 8,
+      "best_value": 17.234085083007812
+    },
+    "timing/train/total_step_time": {
+      "final_step": 8,
+      "final_value": 49.362892150878906,
+      "best_step": 8,
+      "best_value": 49.362892150878906
+    }
+  },
+  "dg_eta0p5": {
+    "validation/accuracy": {
+      "final_step": 8,
+      "final_value": 0.375,
+      "best_step": 4,
+      "best_value": 0.375
+    },
+    "train/reward": {
+      "final_step": 8,
+      "final_value": 0.40625,
+      "best_step": 4,
+      "best_value": 0.8125
+    },
+    "train/loss": {
+      "final_step": 8,
+      "final_value": -0.0029997131787240505,
+      "best_step": 3,
+      "best_value": 0.035634275525808334
+    },
+    "train/baseline_reward/pct_1": {
+      "final_step": 8,
+      "final_value": 25.0,
+      "best_step": 2,
+      "best_value": 50.0
+    },
+    "train/advantages/mean": {
+      "final_step": 8,
+      "final_value": -0.012675530277192593,
+      "best_step": 1,
+      "best_value": 0.0911903828382492
+    },
+    "train/dg_gate_mean": {
+      "final_step": 8,
+      "final_value": 0.5004689693450928,
+      "best_step": 1,
+      "best_value": 0.5067616701126099
+    },
+    "train/dg_gate_positive_mean": {
+      "final_step": 8,
+      "final_value": 0.5004689693450928,
+      "best_step": 1,
+      "best_value": 0.5067616701126099
+    },
+    "train/dg_gate_negative_mean": {
+      "final_step": 8,
+      "final_value": 0.5004689693450928,
+      "best_step": 1,
+      "best_value": 0.5067616701126099
+    },
+    "train/dg_gate_spread": {
+      "final_step": 8,
+      "final_value": 0.0,
+      "best_step": 1,
+      "best_value": 0.0
+    },
+    "train/dg_surprisal_mean": {
+      "final_step": 8,
+      "final_value": 0.25384628772735596,
+      "best_step": 4,
+      "best_value": 0.2670994699001312
+    },
+    "train/dg_surprisal_max": {
+      "final_step": 8,
+      "final_value": 17.004846572875977,
+      "best_step": 8,
+      "best_value": 17.004846572875977
+    },
+    "timing/train/total_step_time": {
+      "final_step": 8,
+      "final_value": 47.44594955444336,
+      "best_step": 4,
+      "best_value": 49.70793914794922
+    }
+  }
+}

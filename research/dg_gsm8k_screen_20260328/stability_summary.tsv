@@ -1,0 +1,4 @@
+run	validation_accuracy_final	reward_final	truncation_final	gen_kl_error_final	dg_gate_mean_final	dg_gate_spread_final	notes
+baseline	0.34375	0.5	None	None	1.0	0.0	
+dg_eta1p0	0.3125	0.5	None	None	0.4982631504535675	0.0	gate_neutral
+dg_eta0p5	0.375	0.40625	None	None	0.5004689693450928	0.0	gate_neutral
