@@ -9,6 +9,8 @@
 
 </div>
 
+> Fork note: this branch adds experimental GRPO extensions for Delightful Policy Gradient (DG) and Kondo-style compute skipping. It includes learner-side DG gating, dense-reference and row-compacted Kondo modes such as `response_dense_rows_v2`, GRPO logging/diagnostics for the new metrics, and DTensor worker compatibility fixes needed to run these experiments on the current stack.
+
 ## 📣 News
 * [03/12/2026] GDPO Support
     * Enabling [Group reward-Decoupled Normalization Policy Optimization](https://arxiv.org/abs/2601.05242) (GDPO) for multi-reward RL training is now supported.
