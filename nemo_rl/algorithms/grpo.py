@@ -1758,6 +1758,9 @@ def grpo_train(
                             "generation_logprobs": flat_messages["generation_logprobs"],
                             "token_mask": flat_messages["token_loss_mask"],
                             "sample_mask": repeated_batch["loss_multiplier"],
+                            "sample_reward": repeated_batch["total_reward"].to(
+                                torch.float32
+                            ),
                             "prompt_group_id": (
                                 torch.arange(
                                     flat_messages["token_ids"].shape[0],
@@ -2896,6 +2899,9 @@ def async_grpo_train(
                             "generation_logprobs": flat_messages["generation_logprobs"],
                             "token_mask": flat_messages["token_loss_mask"],
                             "sample_mask": repeated_batch["loss_multiplier"],
+                            "sample_reward": repeated_batch["total_reward"].to(
+                                torch.float32
+                            ),
                             "prompt_group_id": (
                                 torch.arange(
                                     flat_messages["token_ids"].shape[0],

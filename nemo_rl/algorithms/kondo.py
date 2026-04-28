@@ -17,6 +17,10 @@ KondoMode = Literal[
 KondoPriorityMode = Literal[
     "delight",
     "split_dual_tempered_delight",
+    "split_dual_tempered_competence",
+    "split_dual_tempered_error_anchor",
+    "split_dual_tempered_row_hierarchy",
+    "split_dual_tempered_row_sum",
     "advantage",
     "abs_advantage",
     "surprisal",
@@ -34,6 +38,8 @@ class KondoConfig(TypedDict):
     positive_keep_floor: NotRequired[float]
     negative_keep_floor: NotRequired[float]
     min_keep_probability: NotRequired[float]
+    low_contrast_fallback_low: NotRequired[float]
+    low_contrast_fallback_high: NotRequired[float]
     bypass_on_nonfinite: NotRequired[bool]
 
 
@@ -60,6 +66,52 @@ class KondoScreeningResult:
     should_bypass: bool
 
 
+def _append_kl_only_sentinels(
+    *,
+    selected_rows: torch.Tensor,
+    row_cost: torch.Tensor,
+    row_actor_utility: torch.Tensor,
+    prompt_group_id: torch.Tensor,
+    sample_reward: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    valid_rows = row_cost > 0
+    if not valid_rows.any():
+        return selected_rows, torch.empty(0, dtype=torch.long, device=row_cost.device)
+
+    selected_mask = torch.zeros_like(valid_rows, dtype=torch.bool)
+    if selected_rows.numel() > 0:
+        selected_mask[selected_rows] = True
+
+    prompt_group_id = prompt_group_id.to(dtype=torch.int64)
+    sample_reward = sample_reward.to(dtype=torch.float32)
+    batch_mean_reward = sample_reward[valid_rows].mean()
+
+    sentinel_rows: list[torch.Tensor] = []
+    for group in torch.unique(prompt_group_id[valid_rows]):
+        group_rows = valid_rows & (prompt_group_id == group)
+        if not group_rows.any() or selected_mask[group_rows].any():
+            continue
+
+        group_actor = row_actor_utility[group_rows].sum().to(dtype=torch.float32)
+        group_reward = sample_reward[group_rows].mean().to(dtype=torch.float32)
+        if float(group_actor.item()) > 1e-8:
+            continue
+        if float(group_reward.item()) <= float(batch_mean_reward.item()):
+            continue
+
+        group_indices = group_rows.nonzero(as_tuple=False).squeeze(-1)
+        group_cost = row_cost[group_indices].to(dtype=torch.float32)
+        sentinel_rows.append(group_indices[group_cost.argmax()])
+
+    if not sentinel_rows:
+        return selected_rows, torch.empty(0, dtype=torch.long, device=row_cost.device)
+
+    sentinel_tensor = torch.stack(sentinel_rows).to(dtype=torch.long, device=row_cost.device)
+    combined = torch.cat([selected_rows, sentinel_tensor], dim=0)
+    combined = torch.unique(combined, sorted=True)
+    return combined, sentinel_tensor
+
+
 def resolve_kondo_config(raw_cfg: dict[str, Any] | None) -> KondoConfig:
     cfg: KondoConfig = {
         "enabled": False,
@@ -71,6 +123,8 @@ def resolve_kondo_config(raw_cfg: dict[str, Any] | None) -> KondoConfig:
         "positive_keep_floor": 0.95,
         "negative_keep_floor": 0.25,
         "min_keep_probability": 0.05,
+        "low_contrast_fallback_low": 0.0,
+        "low_contrast_fallback_high": 0.0,
         "bypass_on_nonfinite": True,
     }
     if raw_cfg is not None:
@@ -90,6 +144,10 @@ def resolve_kondo_config(raw_cfg: dict[str, Any] | None) -> KondoConfig:
     if priority_mode not in {
         "delight",
         "split_dual_tempered_delight",
+        "split_dual_tempered_competence",
+        "split_dual_tempered_error_anchor",
+        "split_dual_tempered_row_hierarchy",
+        "split_dual_tempered_row_sum",
         "advantage",
         "abs_advantage",
         "surprisal",
@@ -117,6 +175,20 @@ def resolve_kondo_config(raw_cfg: dict[str, Any] | None) -> KondoConfig:
     if not (0.0 < min_keep_probability <= 1.0):
         raise ValueError("grpo.kondo.min_keep_probability must be in (0, 1]")
 
+    low_contrast_fallback_low = cfg["low_contrast_fallback_low"]
+    low_contrast_fallback_high = cfg["low_contrast_fallback_high"]
+    if low_contrast_fallback_low < 0.0:
+        raise ValueError("grpo.kondo.low_contrast_fallback_low must be >= 0")
+    if low_contrast_fallback_high < 0.0:
+        raise ValueError("grpo.kondo.low_contrast_fallback_high must be >= 0")
+    if low_contrast_fallback_high > 0.0 and not (
+        low_contrast_fallback_low < low_contrast_fallback_high
+    ):
+        raise ValueError(
+            "grpo.kondo.low_contrast_fallback_low must be < "
+            "grpo.kondo.low_contrast_fallback_high when the fallback is enabled"
+        )
+
     if (
         priority_mode == "split_dual_tempered_delight"
         and mode not in {"dense_reference", "stochastic_response_rows"}
@@ -124,6 +196,38 @@ def resolve_kondo_config(raw_cfg: dict[str, Any] | None) -> KondoConfig:
         raise ValueError(
             "grpo.kondo.priority_mode=split_dual_tempered_delight is currently only "
             "supported with grpo.kondo.mode in {dense_reference, stochastic_response_rows}"
+        )
+    if (
+        priority_mode == "split_dual_tempered_competence"
+        and mode != "stochastic_response_rows"
+    ):
+        raise ValueError(
+            "grpo.kondo.priority_mode=split_dual_tempered_competence is currently only "
+            "supported with grpo.kondo.mode=stochastic_response_rows"
+        )
+    if (
+        priority_mode == "split_dual_tempered_error_anchor"
+        and mode != "stochastic_response_rows"
+    ):
+        raise ValueError(
+            "grpo.kondo.priority_mode=split_dual_tempered_error_anchor is currently only "
+            "supported with grpo.kondo.mode=stochastic_response_rows"
+        )
+    if (
+        priority_mode == "split_dual_tempered_row_hierarchy"
+        and mode != "stochastic_response_rows"
+    ):
+        raise ValueError(
+            "grpo.kondo.priority_mode=split_dual_tempered_row_hierarchy is currently only "
+            "supported with grpo.kondo.mode=stochastic_response_rows"
+        )
+    if (
+        priority_mode == "split_dual_tempered_row_sum"
+        and mode != "stochastic_response_rows"
+    ):
+        raise ValueError(
+            "grpo.kondo.priority_mode=split_dual_tempered_row_sum is currently only "
+            "supported with grpo.kondo.mode=stochastic_response_rows"
         )
 
     return cfg
@@ -244,6 +348,199 @@ def _build_split_dual_tempered_dense_priority_and_gate(
     return priority, gate, math.ceil(float(gate.sum().item()))
 
 
+def _build_reward_competence_group_priority(
+    *,
+    row_actor_utility: torch.Tensor,
+    row_tempered_surprisal_mass: torch.Tensor,
+    row_cost: torch.Tensor,
+    prompt_group_id: torch.Tensor,
+    sample_reward: torch.Tensor,
+) -> torch.Tensor:
+    row_sampling_priority = torch.zeros_like(row_actor_utility, dtype=torch.float32)
+    valid_rows = row_cost > 0
+    if not valid_rows.any():
+        return row_sampling_priority
+
+    prompt_group_id = prompt_group_id.to(dtype=torch.int64)
+    sample_reward = sample_reward.to(dtype=torch.float32)
+    batch_mean_reward = sample_reward[valid_rows].mean()
+
+    group_actor_values = []
+    group_competence_values = []
+    group_masks = []
+    for group in torch.unique(prompt_group_id[valid_rows]):
+        group_rows = valid_rows & (prompt_group_id == group)
+        if not group_rows.any():
+            continue
+        group_masks.append(group_rows)
+        actor_value = row_actor_utility[group_rows].sum().to(dtype=torch.float32)
+        reward_excess = (
+            sample_reward[group_rows].mean() - batch_mean_reward
+        ).clamp(min=0.0)
+        competence_value = reward_excess * row_tempered_surprisal_mass[
+            group_rows
+        ].sum().to(dtype=torch.float32)
+        group_actor_values.append(actor_value)
+        group_competence_values.append(competence_value)
+
+    if not group_masks:
+        return row_sampling_priority
+
+    actor_tensor = torch.stack(group_actor_values)
+    competence_tensor = torch.stack(group_competence_values)
+    actor_scale = actor_tensor.mean().clamp(min=1e-8)
+    competence_scale = competence_tensor.mean().clamp(min=1e-8)
+    normalized_group_signal = actor_tensor / actor_scale
+    if float(competence_tensor.max().item()) > 0.0:
+        normalized_group_signal = normalized_group_signal + (
+            competence_tensor / competence_scale
+        )
+
+    for group_rows, group_signal in zip(group_masks, normalized_group_signal):
+        row_count = int(group_rows.sum().item())
+        row_sampling_priority[group_rows] = group_signal / max(row_count, 1)
+
+    return row_sampling_priority
+
+
+def _build_error_anchor_group_priority(
+    *,
+    row_actor_utility: torch.Tensor,
+    row_tempered_surprisal_mass: torch.Tensor,
+    row_cost: torch.Tensor,
+    prompt_group_id: torch.Tensor,
+    sample_reward: torch.Tensor,
+) -> torch.Tensor:
+    row_sampling_priority = torch.zeros_like(row_actor_utility, dtype=torch.float32)
+    valid_rows = row_cost > 0
+    if not valid_rows.any():
+        return row_sampling_priority
+
+    prompt_group_id = prompt_group_id.to(dtype=torch.int64)
+    sample_reward = sample_reward.to(dtype=torch.float32)
+
+    group_correction_values = []
+    group_anchor_values = []
+    group_masks = []
+    for group in torch.unique(prompt_group_id[valid_rows]):
+        group_rows = valid_rows & (prompt_group_id == group)
+        if not group_rows.any():
+            continue
+        group_masks.append(group_rows)
+
+        mean_reward = sample_reward[group_rows].mean().clamp(min=0.0)
+        residual_error = (1.0 - mean_reward).clamp(min=0.0)
+        correction_value = residual_error * row_actor_utility[group_rows].sum().to(
+            dtype=torch.float32
+        )
+        anchor_value = mean_reward * row_tempered_surprisal_mass[group_rows].sum().to(
+            dtype=torch.float32
+        )
+
+        group_correction_values.append(correction_value)
+        group_anchor_values.append(anchor_value)
+
+    if not group_masks:
+        return row_sampling_priority
+
+    correction_tensor = torch.stack(group_correction_values)
+    anchor_tensor = torch.stack(group_anchor_values)
+    correction_signal = torch.zeros_like(correction_tensor)
+    anchor_signal = torch.zeros_like(anchor_tensor)
+    if float(correction_tensor.max().item()) > 0.0:
+        correction_signal = correction_tensor / correction_tensor.mean().clamp(min=1e-8)
+    if float(anchor_tensor.max().item()) > 0.0:
+        anchor_signal = anchor_tensor / anchor_tensor.mean().clamp(min=1e-8)
+    normalized_group_signal = torch.maximum(correction_signal, anchor_signal)
+
+    for group_rows, group_signal in zip(group_masks, normalized_group_signal):
+        row_count = int(group_rows.sum().item())
+        row_sampling_priority[group_rows] = group_signal / max(row_count, 1)
+
+    return row_sampling_priority
+
+
+def _build_hierarchical_row_priority(
+    *,
+    row_actor_utility: torch.Tensor,
+    row_tempered_surprisal_mass: torch.Tensor,
+    row_cost: torch.Tensor,
+    prompt_group_id: torch.Tensor,
+    sample_reward: torch.Tensor,
+) -> torch.Tensor:
+    row_sampling_priority = torch.zeros_like(row_actor_utility, dtype=torch.float32)
+    valid_rows = row_cost > 0
+    if not valid_rows.any():
+        return row_sampling_priority
+
+    prompt_group_id = prompt_group_id.to(dtype=torch.int64)
+    sample_reward = sample_reward.to(dtype=torch.float32)
+
+    group_actor_values = []
+    group_anchor_values = []
+    group_masks = []
+    for group in torch.unique(prompt_group_id[valid_rows]):
+        group_rows = valid_rows & (prompt_group_id == group)
+        if not group_rows.any():
+            continue
+        group_masks.append(group_rows)
+        mean_reward = sample_reward[group_rows].mean().clamp(min=0.0)
+        group_actor_values.append(
+            row_actor_utility[group_rows].sum().to(dtype=torch.float32)
+        )
+        group_anchor_values.append(
+            mean_reward
+            * row_tempered_surprisal_mass[group_rows].sum().to(dtype=torch.float32)
+        )
+
+    if not group_masks:
+        return row_sampling_priority
+
+    actor_tensor = torch.stack(group_actor_values)
+    anchor_tensor = torch.stack(group_anchor_values)
+    actor_signal = torch.zeros_like(actor_tensor)
+    anchor_signal = torch.zeros_like(anchor_tensor)
+    if float(actor_tensor.max().item()) > 0.0:
+        actor_signal = actor_tensor / actor_tensor.mean().clamp(min=1e-8)
+    if float(anchor_tensor.max().item()) > 0.0:
+        anchor_signal = anchor_tensor / anchor_tensor.mean().clamp(min=1e-8)
+
+    for group_rows, group_actor, group_anchor, actor_value, anchor_value in zip(
+        group_masks,
+        actor_signal,
+        anchor_signal,
+        group_actor_values,
+        group_anchor_values,
+    ):
+        if float(group_actor.item()) >= float(group_anchor.item()):
+            within_group_signal = row_actor_utility[group_rows].clamp(min=0).to(
+                dtype=torch.float32
+            )
+            if float(actor_value.item()) <= 1e-8:
+                within_group_signal = row_tempered_surprisal_mass[group_rows].to(
+                    dtype=torch.float32
+                )
+        else:
+            within_group_signal = row_tempered_surprisal_mass[group_rows].to(
+                dtype=torch.float32
+            )
+            if float(anchor_value.item()) <= 1e-8:
+                within_group_signal = row_actor_utility[group_rows].clamp(min=0).to(
+                    dtype=torch.float32
+                )
+
+        if float(within_group_signal.sum().item()) <= 1e-8:
+            within_group_signal = torch.ones_like(within_group_signal)
+
+        row_sampling_priority[group_rows] = (
+            torch.maximum(group_actor, group_anchor)
+            * within_group_signal
+            / within_group_signal.sum().clamp(min=1e-8)
+        )
+
+    return row_sampling_priority
+
+
 def compute_required_row_multiple(
     dp_size: int,
     train_micro_batch_size: int,
@@ -310,13 +607,21 @@ def screen_kondo_tokens(
 
     if screenable_token_count > 0:
         surprisal[finite_screen_mask] = (-prev_logprobs.detach())[finite_screen_mask]
-        if cfg["priority_mode"] == "split_dual_tempered_delight":
+        if cfg["priority_mode"] in {
+            "split_dual_tempered_delight",
+            "split_dual_tempered_competence",
+            "split_dual_tempered_error_anchor",
+            "split_dual_tempered_row_hierarchy",
+            "split_dual_tempered_row_sum",
+        }:
             tempered_surprisal = torch.log1p(
                 surprisal.clamp(min=0) / cfg["surprisal_temperature"]
             )
             if cfg["mode"] == "stochastic_response_rows":
                 # Use a dense teacher built from detached actor magnitude, then
-                # sample prompt groups from the resulting teacher coverage.
+                # either sample prompt groups from the resulting teacher
+                # coverage, from the raw cumulative row signal, or from the
+                # competence-augmented group signal.
                 priority = advantages.detach().abs() * tempered_surprisal
                 reference_token_gate, _ = _build_exact_topk_token_gate(
                     priority=priority,
@@ -379,12 +684,75 @@ def screen_kondo_tokens(
     )
 
     row_response_utility = (priority * finite_screen_mask).sum(dim=-1)
+    row_tempered_surprisal_mass = (
+        torch.log1p(surprisal.clamp(min=0) / cfg["surprisal_temperature"])
+        * finite_screen_mask
+    ).sum(dim=-1)
     row_reference_tokens = reference_token_gate.sum(dim=-1).to(torch.float32)
     row_abs_priority = (reference_token_gate * priority.abs()).sum(dim=-1)
     row_sampling_priority = row_abs_priority.clone()
     if (
         cfg["priority_mode"] == "split_dual_tempered_delight"
         and cfg["mode"] == "dense_reference"
+    ):
+        row_sampling_priority = row_response_utility.clamp(min=0)
+    elif (
+        cfg["priority_mode"] == "split_dual_tempered_competence"
+        and cfg["mode"] == "stochastic_response_rows"
+    ):
+        prompt_group_id = train_data.get("prompt_group_id")
+        sample_reward = train_data.get("sample_reward")
+        if prompt_group_id is None or sample_reward is None:
+            raise ValueError(
+                "split_dual_tempered_competence requires prompt_group_id and "
+                "sample_reward in the training batch"
+            )
+        row_sampling_priority = _build_reward_competence_group_priority(
+            row_actor_utility=row_response_utility.clamp(min=0),
+            row_tempered_surprisal_mass=row_tempered_surprisal_mass,
+            row_cost=row_cost,
+            prompt_group_id=prompt_group_id,
+            sample_reward=sample_reward,
+        )
+    elif (
+        cfg["priority_mode"] == "split_dual_tempered_error_anchor"
+        and cfg["mode"] == "stochastic_response_rows"
+    ):
+        prompt_group_id = train_data.get("prompt_group_id")
+        sample_reward = train_data.get("sample_reward")
+        if prompt_group_id is None or sample_reward is None:
+            raise ValueError(
+                "split_dual_tempered_error_anchor requires prompt_group_id and "
+                "sample_reward in the training batch"
+            )
+        row_sampling_priority = _build_error_anchor_group_priority(
+            row_actor_utility=row_response_utility.clamp(min=0),
+            row_tempered_surprisal_mass=row_tempered_surprisal_mass,
+            row_cost=row_cost,
+            prompt_group_id=prompt_group_id,
+            sample_reward=sample_reward,
+        )
+    elif (
+        cfg["priority_mode"] == "split_dual_tempered_row_hierarchy"
+        and cfg["mode"] == "stochastic_response_rows"
+    ):
+        prompt_group_id = train_data.get("prompt_group_id")
+        sample_reward = train_data.get("sample_reward")
+        if prompt_group_id is None or sample_reward is None:
+            raise ValueError(
+                "split_dual_tempered_row_hierarchy requires prompt_group_id and "
+                "sample_reward in the training batch"
+            )
+        row_sampling_priority = _build_hierarchical_row_priority(
+            row_actor_utility=row_response_utility.clamp(min=0),
+            row_tempered_surprisal_mass=row_tempered_surprisal_mass,
+            row_cost=row_cost,
+            prompt_group_id=prompt_group_id,
+            sample_reward=sample_reward,
+        )
+    elif (
+        cfg["priority_mode"] == "split_dual_tempered_row_sum"
+        and cfg["mode"] == "stochastic_response_rows"
     ):
         row_sampling_priority = row_response_utility.clamp(min=0)
     row_response_density = row_response_utility / row_cost.clamp(min=1).to(
@@ -425,6 +793,8 @@ def _solve_stochastic_row_keep_probabilities(
     target_token_fraction: float,
     total_valid_tokens: int,
     min_keep_probability: float,
+    low_contrast_fallback_low: float = 0.0,
+    low_contrast_fallback_high: float = 0.0,
 ) -> torch.Tensor:
     valid_rows = row_cost > 0
     keep_prob = torch.zeros_like(row_signal, dtype=torch.float32)
@@ -468,6 +838,25 @@ def _solve_stochastic_row_keep_probabilities(
         min=min_keep_probability,
         max=1.0,
     )
+    if low_contrast_fallback_high > 0.0 and score.numel() > 1:
+        contrast = float(
+            (
+                (score.max() - score.min())
+                / score.abs().mean().clamp(min=1e-8)
+            ).item()
+        )
+        sparse_weight = min(
+            max(
+                (contrast - low_contrast_fallback_low)
+                / (low_contrast_fallback_high - low_contrast_fallback_low),
+                0.0,
+            ),
+            1.0,
+        )
+        if sparse_weight < 1.0:
+            keep_prob[valid_rows] = (
+                sparse_weight * keep_prob[valid_rows] + (1.0 - sparse_weight)
+            )
     return keep_prob
 
 
@@ -479,6 +868,8 @@ def _solve_stochastic_row_keep_probabilities_by_group(
     target_token_fraction: float,
     total_valid_tokens: int,
     min_keep_probability: float,
+    low_contrast_fallback_low: float = 0.0,
+    low_contrast_fallback_high: float = 0.0,
 ) -> torch.Tensor:
     keep_prob = torch.zeros_like(row_signal, dtype=torch.float32)
     valid_rows = row_cost > 0
@@ -505,6 +896,8 @@ def _solve_stochastic_row_keep_probabilities_by_group(
         target_token_fraction=target_token_fraction,
         total_valid_tokens=total_valid_tokens,
         min_keep_probability=min_keep_probability,
+        low_contrast_fallback_low=low_contrast_fallback_low,
+        low_contrast_fallback_high=low_contrast_fallback_high,
     )
     for group_rows, group_keep_prob in zip(group_masks, solved_group_keep_prob):
         keep_prob[group_rows] = group_keep_prob
@@ -624,7 +1017,10 @@ def apply_kondo_mode(
         return train_data, metrics
 
     prompt_group_id = train_data.get("prompt_group_id")
-    if prompt_group_id is not None:
+    if (
+        prompt_group_id is not None
+        and cfg["priority_mode"] != "split_dual_tempered_row_hierarchy"
+    ):
         row_keep_prob = _solve_stochastic_row_keep_probabilities_by_group(
             row_signal=screening.row_sampling_priority,
             row_cost=screening.row_cost,
@@ -632,6 +1028,8 @@ def apply_kondo_mode(
             target_token_fraction=cfg["target_backward_token_fraction"],
             total_valid_tokens=screening.total_valid_tokens,
             min_keep_probability=cfg["min_keep_probability"],
+            low_contrast_fallback_low=cfg["low_contrast_fallback_low"],
+            low_contrast_fallback_high=cfg["low_contrast_fallback_high"],
         )
         selected_rows = _sample_stochastic_groups(
             keep_prob=row_keep_prob,
@@ -645,16 +1043,43 @@ def apply_kondo_mode(
             target_token_fraction=cfg["target_backward_token_fraction"],
             total_valid_tokens=screening.total_valid_tokens,
             min_keep_probability=cfg["min_keep_probability"],
+            low_contrast_fallback_low=cfg["low_contrast_fallback_low"],
+            low_contrast_fallback_high=cfg["low_contrast_fallback_high"],
         )
         selected_rows = _sample_stochastic_rows(
             keep_prob=row_keep_prob,
             row_cost=screening.row_cost,
+        )
+    sentinel_rows = torch.empty(0, dtype=torch.long, device=selected_rows.device)
+    if (
+        cfg["priority_mode"] == "split_dual_tempered_row_sum"
+        and prompt_group_id is not None
+        and "sample_reward" in train_data
+    ):
+        selected_rows, sentinel_rows = _append_kl_only_sentinels(
+            selected_rows=selected_rows,
+            row_cost=screening.row_cost,
+            row_actor_utility=screening.row_response_utility.clamp(min=0),
+            prompt_group_id=prompt_group_id.to(dtype=torch.int64),
+            sample_reward=train_data["sample_reward"],
         )
     if selected_rows.numel() == 0:
         metrics["kondo_bypass_step"] = 1.0
         return train_data, metrics
 
     policy_train_data = train_data.select_indices(selected_rows)
+    sentinel_selected_mask = torch.zeros(
+        selected_rows.numel(),
+        dtype=torch.bool,
+        device=selected_rows.device,
+    )
+    if sentinel_rows.numel() > 0:
+        sentinel_selected_mask = (
+            selected_rows.unsqueeze(1) == sentinel_rows.unsqueeze(0)
+        ).any(dim=1)
+        selected_token_mask = policy_train_data["token_mask"].clone()
+        selected_token_mask[sentinel_selected_mask] = 0.0
+        policy_train_data["loss_token_mask"] = selected_token_mask
     full_batch_normalizer = torch.full(
         (selected_rows.numel(),),
         float(screening.total_valid_tokens),
@@ -665,16 +1090,22 @@ def apply_kondo_mode(
     selected_keep_prob = row_keep_prob[selected_rows].clamp(
         min=cfg["min_keep_probability"]
     )
-    policy_train_data["sample_loss_weight"] = 1.0 / selected_keep_prob
+    if sentinel_rows.numel() > 0:
+        sample_loss_weight = 1.0 / selected_keep_prob
+        sample_loss_weight[sentinel_selected_mask] = 0.0
+        policy_train_data["sample_loss_weight"] = sample_loss_weight
 
     row_selected = torch.zeros_like(train_data["sample_mask"], dtype=torch.float32)
     row_selected[selected_rows] = 1.0
     train_data["kondo_row_selected"] = row_selected
     train_data["kondo_row_keep_prob"] = row_keep_prob.to(dtype=torch.float32)
     row_ht_weight = torch.zeros_like(train_data["sample_mask"], dtype=torch.float32)
-    row_ht_weight[selected_rows] = (1.0 / selected_keep_prob).to(
+    actor_row_weights = (1.0 / selected_keep_prob).to(
         dtype=row_ht_weight.dtype
     )
+    if sentinel_rows.numel() > 0:
+        actor_row_weights[sentinel_selected_mask] = 0.0
+    row_ht_weight[selected_rows] = actor_row_weights
     train_data["kondo_row_ht_weight"] = row_ht_weight
 
     kept_valid_tokens = screening.row_cost[selected_rows].sum().item()
@@ -695,7 +1126,10 @@ def apply_kondo_mode(
     metrics["kondo_recall_floor_satisfied"] = 1.0
     valid_keep_prob = row_keep_prob[screening.row_cost > 0]
     metrics["kondo_row_keep_probability_mean"] = float(valid_keep_prob.mean().item())
+    nonzero_actor_weights = actor_row_weights[actor_row_weights > 0]
     metrics["kondo_row_ht_weight_mean"] = float(
-        (1.0 / selected_keep_prob).mean().item()
+        nonzero_actor_weights.mean().item()
+        if nonzero_actor_weights.numel() > 0
+        else 0.0
     )
     return policy_train_data, metrics

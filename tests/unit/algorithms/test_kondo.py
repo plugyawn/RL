@@ -16,6 +16,7 @@ import pytest
 import torch
 
 from nemo_rl.algorithms.kondo import (
+    _solve_stochastic_row_keep_probabilities,
     apply_kondo_mode,
     compute_required_row_multiple,
     resolve_kondo_config,
@@ -75,6 +76,23 @@ def test_compute_required_row_multiple_respects_batching_mode():
     assert compute_required_row_multiple(2, 4, False, True) == 2
 
 
+def test_low_contrast_fallback_smoothly_densifies_keep_probabilities():
+    keep_prob = _solve_stochastic_row_keep_probabilities(
+        row_signal=torch.tensor([1.0, 1.0], dtype=torch.float32),
+        row_cost=torch.tensor([4, 4], dtype=torch.int64),
+        target_token_fraction=0.7,
+        total_valid_tokens=8,
+        min_keep_probability=0.05,
+        low_contrast_fallback_low=0.2,
+        low_contrast_fallback_high=0.5,
+    )
+
+    torch.testing.assert_close(
+        keep_prob,
+        torch.ones_like(keep_prob, dtype=torch.float32),
+    )
+
+
 def test_resolve_kondo_config_rejects_removed_legacy_modes_and_priorities():
     with pytest.raises(ValueError, match="Unsupported Kondo mode"):
         resolve_kondo_config({"enabled": True, "mode": "response_dense_rows_v2"})
@@ -85,6 +103,66 @@ def test_resolve_kondo_config_rejects_removed_legacy_modes_and_priorities():
                 "enabled": True,
                 "mode": "dense_reference",
                 "priority_mode": "stratified_pg_kl_tempered_delight",
+            }
+        )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "grpo.kondo.priority_mode=split_dual_tempered_row_sum is currently only "
+            "supported with grpo.kondo.mode=stochastic_response_rows"
+        ),
+    ):
+        resolve_kondo_config(
+            {
+                "enabled": True,
+                "mode": "dense_reference",
+                "priority_mode": "split_dual_tempered_row_sum",
+            }
+        )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "grpo.kondo.priority_mode=split_dual_tempered_competence is currently only "
+            "supported with grpo.kondo.mode=stochastic_response_rows"
+        ),
+    ):
+        resolve_kondo_config(
+            {
+                "enabled": True,
+                "mode": "dense_reference",
+                "priority_mode": "split_dual_tempered_competence",
+            }
+        )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "grpo.kondo.priority_mode=split_dual_tempered_error_anchor is currently only "
+            "supported with grpo.kondo.mode=stochastic_response_rows"
+        ),
+    ):
+        resolve_kondo_config(
+            {
+                "enabled": True,
+                "mode": "dense_reference",
+                "priority_mode": "split_dual_tempered_error_anchor",
+            }
+        )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "grpo.kondo.priority_mode=split_dual_tempered_row_hierarchy is currently only "
+            "supported with grpo.kondo.mode=stochastic_response_rows"
+        ),
+    ):
+        resolve_kondo_config(
+            {
+                "enabled": True,
+                "mode": "dense_reference",
+                "priority_mode": "split_dual_tempered_row_hierarchy",
             }
         )
 
@@ -238,6 +316,293 @@ def test_split_dual_tempered_delight_uses_teacher_coverage_row_priority():
     )
     torch.testing.assert_close(screening.row_sampling_priority, expected)
     assert screening.row_sampling_priority[0].item() > screening.row_sampling_priority[1].item()
+
+
+def test_split_dual_tempered_row_sum_uses_raw_cumulative_row_priority():
+    train_data = BatchedDataDict(
+        {
+            "input_ids": torch.tensor(
+                [
+                    [1, 11, 12, 13],
+                    [1, 21, 22, 23],
+                ],
+                dtype=torch.long,
+            ),
+            "token_mask": torch.tensor(
+                [
+                    [0.0, 1.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0, 1.0],
+                ]
+            ),
+            "sample_mask": torch.tensor([1.0, 1.0]),
+            "advantages": torch.tensor(
+                [
+                    [0.0, 10.0, 0.0, 0.0],
+                    [0.0, 4.0, 4.0, 4.0],
+                ]
+            ),
+            "prev_logprobs": torch.tensor(
+                [
+                    [0.0, -1.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0, -1.0],
+                ]
+            ),
+            "generation_logprobs": torch.tensor(
+                [
+                    [0.0, -1.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0, -1.0],
+                ]
+            ),
+        }
+    )
+    cfg = resolve_kondo_config(
+        {
+            "enabled": True,
+            "mode": "stochastic_response_rows",
+            "priority_mode": "split_dual_tempered_row_sum",
+            "target_backward_token_fraction": 0.25,
+            "surprisal_temperature": 1.0,
+        }
+    )
+    screening = screen_kondo_tokens(train_data, cfg)
+
+    assert screening is not None
+    expected = torch.tensor(
+        [
+            10.0 * torch.log1p(torch.tensor(1.0)),
+            12.0 * torch.log1p(torch.tensor(1.0)),
+        ],
+        dtype=torch.float32,
+    )
+    torch.testing.assert_close(screening.row_sampling_priority, expected)
+    assert screening.row_sampling_priority[1].item() > screening.row_sampling_priority[0].item()
+
+
+def test_split_dual_tempered_row_hierarchy_preserves_solved_prompt_without_prompt_atomicity():
+    train_data = BatchedDataDict(
+        {
+            "input_ids": torch.tensor(
+                [
+                    [1, 11, 12],
+                    [1, 21, 22],
+                    [1, 31, 32],
+                    [1, 41, 42],
+                ],
+                dtype=torch.long,
+            ),
+            "token_mask": torch.tensor(
+                [
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                ]
+            ),
+            "sample_mask": torch.tensor([1.0, 1.0, 1.0, 1.0]),
+            "advantages": torch.tensor(
+                [
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [0.0, 2.0, 0.0],
+                    [0.0, 0.5, 0.0],
+                ],
+                dtype=torch.float32,
+            ),
+            "prev_logprobs": torch.tensor(
+                [
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                ]
+            ),
+            "generation_logprobs": torch.tensor(
+                [
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                ]
+            ),
+            "sample_reward": torch.tensor([1.0, 1.0, 0.25, 0.25]),
+            "prompt_group_id": torch.tensor([0, 0, 1, 1], dtype=torch.int64),
+        }
+    )
+    cfg = resolve_kondo_config(
+        {
+            "enabled": True,
+            "mode": "stochastic_response_rows",
+            "priority_mode": "split_dual_tempered_row_hierarchy",
+            "target_backward_token_fraction": 0.25,
+            "surprisal_temperature": 1.0,
+        }
+    )
+    screening = screen_kondo_tokens(train_data, cfg)
+
+    assert screening is not None
+    torch.testing.assert_close(
+        screening.row_sampling_priority[:2],
+        torch.full((2,), screening.row_sampling_priority[0], dtype=torch.float32),
+    )
+    assert screening.row_sampling_priority[0].item() > 0.0
+    assert screening.row_sampling_priority[2].item() > screening.row_sampling_priority[3].item()
+    assert screening.row_sampling_priority[3].item() > 0.0
+
+
+def test_split_dual_tempered_competence_rescues_high_reward_zero_actor_group():
+    train_data = BatchedDataDict(
+        {
+            "input_ids": torch.tensor(
+                [
+                    [1, 11, 12],
+                    [1, 21, 22],
+                    [1, 31, 32],
+                    [1, 41, 42],
+                ],
+                dtype=torch.long,
+            ),
+            "token_mask": torch.tensor(
+                [
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                ]
+            ),
+            "sample_mask": torch.tensor([1.0, 1.0, 1.0, 1.0]),
+            "advantages": torch.zeros((4, 3), dtype=torch.float32),
+            "prev_logprobs": torch.tensor(
+                [
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                ]
+            ),
+            "generation_logprobs": torch.tensor(
+                [
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                ]
+            ),
+            "sample_reward": torch.tensor([1.0, 1.0, 0.0, 0.0]),
+            "prompt_group_id": torch.tensor([0, 0, 1, 1], dtype=torch.int64),
+        }
+    )
+    cfg = resolve_kondo_config(
+        {
+            "enabled": True,
+            "mode": "stochastic_response_rows",
+            "priority_mode": "split_dual_tempered_competence",
+            "target_backward_token_fraction": 0.25,
+            "surprisal_temperature": 1.0,
+        }
+    )
+    screening = screen_kondo_tokens(train_data, cfg)
+
+    assert screening is not None
+    torch.testing.assert_close(
+        screening.row_sampling_priority[:2],
+        torch.full((2,), screening.row_sampling_priority[0], dtype=torch.float32),
+    )
+    torch.testing.assert_close(
+        screening.row_sampling_priority[2:],
+        torch.zeros(2, dtype=torch.float32),
+    )
+    assert screening.row_sampling_priority[0].item() > 0.0
+
+
+def test_split_dual_tempered_error_anchor_preserves_solved_group_without_rescuing_wrong_group():
+    train_data = BatchedDataDict(
+        {
+            "input_ids": torch.tensor(
+                [
+                    [1, 11, 12],
+                    [1, 21, 22],
+                    [1, 31, 32],
+                    [1, 41, 42],
+                    [1, 51, 52],
+                    [1, 61, 62],
+                ],
+                dtype=torch.long,
+            ),
+            "token_mask": torch.tensor(
+                [
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                ]
+            ),
+            "sample_mask": torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+            "advantages": torch.tensor(
+                [
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.25, 0.25],
+                    [0.0, 0.25, 0.25],
+                ],
+                dtype=torch.float32,
+            ),
+            "prev_logprobs": torch.tensor(
+                [
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                ]
+            ),
+            "generation_logprobs": torch.tensor(
+                [
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                ]
+            ),
+            "sample_reward": torch.tensor([1.0, 1.0, 0.0, 0.0, 0.875, 0.875]),
+            "prompt_group_id": torch.tensor([0, 0, 1, 1, 2, 2], dtype=torch.int64),
+        }
+    )
+    cfg = resolve_kondo_config(
+        {
+            "enabled": True,
+            "mode": "stochastic_response_rows",
+            "priority_mode": "split_dual_tempered_error_anchor",
+            "target_backward_token_fraction": 0.25,
+            "surprisal_temperature": 1.0,
+        }
+    )
+    screening = screen_kondo_tokens(train_data, cfg)
+
+    assert screening is not None
+    solved_group = screening.row_sampling_priority[:2]
+    wrong_group = screening.row_sampling_priority[2:4]
+    nearly_solved_group = screening.row_sampling_priority[4:]
+    torch.testing.assert_close(
+        solved_group,
+        torch.full((2,), solved_group[0], dtype=torch.float32),
+    )
+    torch.testing.assert_close(
+        wrong_group,
+        torch.zeros(2, dtype=torch.float32),
+    )
+    torch.testing.assert_close(
+        nearly_solved_group,
+        torch.full((2,), nearly_solved_group[0], dtype=torch.float32),
+    )
+    assert solved_group[0].item() > 0.0
+    assert nearly_solved_group[0].item() > 0.0
 
 
 def test_apply_kondo_mode_dense_reference_preserves_full_batch():
@@ -421,6 +786,180 @@ def test_stochastic_response_rows_samples_prompt_groups_atomically():
         group1_selected, torch.full_like(group1_selected, group1_selected[0])
     )
     assert metrics["kondo_rows_kept"] in {0.0, 2.0, 4.0}
+
+
+def test_row_sum_adds_kl_only_sentinel_for_dropped_solved_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    train_data = BatchedDataDict(
+        {
+            "input_ids": torch.tensor(
+                [[1, 11, 12], [1, 21, 22], [1, 31, 32], [1, 41, 42]],
+                dtype=torch.long,
+            ),
+            "token_mask": torch.tensor(
+                [
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                ]
+            ),
+            "sample_mask": torch.tensor([1.0, 1.0, 1.0, 1.0]),
+            "advantages": torch.tensor(
+                [
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.5, 0.5],
+                    [0.0, 0.5, 0.5],
+                ],
+                dtype=torch.float32,
+            ),
+            "prev_logprobs": torch.tensor(
+                [
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                ]
+            ),
+            "generation_logprobs": torch.tensor(
+                [
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                ]
+            ),
+            "sample_reward": torch.tensor([1.0, 1.0, 0.5, 0.5]),
+            "prompt_group_id": torch.tensor([0, 0, 1, 1], dtype=torch.int64),
+        }
+    )
+    cfg = resolve_kondo_config(
+        {
+            "enabled": True,
+            "mode": "stochastic_response_rows",
+            "priority_mode": "split_dual_tempered_row_sum",
+            "target_backward_token_fraction": 0.3,
+            "surprisal_temperature": 1.0,
+            "min_keep_probability": 0.05,
+        }
+    )
+    screening = screen_kondo_tokens(train_data, cfg)
+    assert screening is not None
+
+    monkeypatch.setattr(
+        "nemo_rl.algorithms.kondo._sample_stochastic_groups",
+        lambda **kwargs: torch.tensor([2, 3], dtype=torch.long),
+    )
+
+    policy_train_data, _ = apply_kondo_mode(
+        train_data=train_data,
+        screening=screening,
+        cfg=cfg,
+        row_multiple=1,
+    )
+
+    zero_actor_rows = (
+        policy_train_data["loss_token_mask"][:, 1:].sum(dim=-1) == 0
+    )
+    assert policy_train_data["input_ids"].shape[0] == 3
+    assert int(zero_actor_rows.sum().item()) == 1
+    torch.testing.assert_close(
+        policy_train_data["sample_loss_weight"][zero_actor_rows],
+        torch.zeros(1, dtype=torch.float32),
+    )
+    assert (
+        policy_train_data["loss_token_mask"][~zero_actor_rows][:, 1:].sum().item()
+        > 0.0
+    )
+
+
+def test_row_hierarchy_uses_row_sampling_even_with_prompt_groups(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    train_data = BatchedDataDict(
+        {
+            "input_ids": torch.tensor(
+                [[1, 11, 12], [1, 21, 22], [1, 31, 32], [1, 41, 42]],
+                dtype=torch.long,
+            ),
+            "token_mask": torch.tensor(
+                [
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                ]
+            ),
+            "sample_mask": torch.tensor([1.0, 1.0, 1.0, 1.0]),
+            "advantages": torch.tensor(
+                [
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [0.0, 2.0, 0.0],
+                    [0.0, 0.5, 0.0],
+                ],
+                dtype=torch.float32,
+            ),
+            "prev_logprobs": torch.tensor(
+                [
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                ]
+            ),
+            "generation_logprobs": torch.tensor(
+                [
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, -1.0, -1.0],
+                ]
+            ),
+            "sample_reward": torch.tensor([1.0, 1.0, 0.25, 0.25]),
+            "prompt_group_id": torch.tensor([0, 0, 1, 1], dtype=torch.int64),
+        }
+    )
+    cfg = resolve_kondo_config(
+        {
+            "enabled": True,
+            "mode": "stochastic_response_rows",
+            "priority_mode": "split_dual_tempered_row_hierarchy",
+            "target_backward_token_fraction": 0.3,
+            "surprisal_temperature": 1.0,
+            "min_keep_probability": 0.05,
+        }
+    )
+    screening = screen_kondo_tokens(train_data, cfg)
+    assert screening is not None
+
+    def _fail_group_sampler(**kwargs):
+        raise AssertionError("group sampler should not be used")
+
+    monkeypatch.setattr(
+        "nemo_rl.algorithms.kondo._sample_stochastic_groups",
+        _fail_group_sampler,
+    )
+    monkeypatch.setattr(
+        "nemo_rl.algorithms.kondo._sample_stochastic_rows",
+        lambda **kwargs: torch.tensor([0, 2], dtype=torch.long),
+    )
+
+    policy_train_data, metrics = apply_kondo_mode(
+        train_data=train_data,
+        screening=screening,
+        cfg=cfg,
+        row_multiple=1,
+    )
+
+    assert policy_train_data["input_ids"].shape[0] == 2
+    torch.testing.assert_close(
+        train_data["kondo_row_selected"],
+        torch.tensor([1.0, 0.0, 1.0, 0.0]),
+    )
+    assert metrics["kondo_rows_kept"] == 2.0
 
 
 def test_stochastic_response_rows_validates_keep_probability_and_mode():
