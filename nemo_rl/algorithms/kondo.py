@@ -1,3 +1,17 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import math
@@ -547,6 +561,41 @@ def _sample_stochastic_rows(
     return selected.nonzero(as_tuple=False).squeeze(-1).to(dtype=torch.long)
 
 
+def _mark_dense_bypass(
+    *,
+    train_data: BatchedDataDict[Any],
+    screening: KondoScreeningResult,
+    metrics: dict[str, float],
+) -> BatchedDataDict[Any]:
+    row_selected = (screening.row_cost > 0).to(dtype=torch.float32)
+    row_keep_prob = torch.zeros_like(train_data["sample_mask"], dtype=torch.float32)
+    row_keep_prob[row_selected > 0] = 1.0
+    train_data["kondo_row_selected"] = row_selected
+    train_data["kondo_row_keep_prob"] = row_keep_prob
+    train_data["kondo_row_ht_weight"] = row_selected
+
+    kept_rows = float(row_selected.sum().item())
+    has_valid_tokens = screening.total_valid_tokens > 0
+    valid_keep_prob = row_keep_prob[screening.row_cost > 0]
+    metrics["kondo_bypass_step"] = 1.0
+    metrics["kondo_rows_kept"] = kept_rows
+    metrics["kondo_selected_token_recall"] = 1.0
+    metrics["kondo_selected_token_fraction"] = float(
+        screening.total_reference_tokens / max(screening.total_valid_tokens, 1)
+    )
+    metrics["kondo_actual_backward_token_fraction"] = 1.0 if has_valid_tokens else 0.0
+    metrics["kondo_kept_row_token_fraction"] = 1.0 if has_valid_tokens else 0.0
+    metrics["kondo_row_keep_probability_mean"] = (
+        float(valid_keep_prob.mean().item()) if valid_keep_prob.numel() > 0 else 0.0
+    )
+    metrics["kondo_row_ht_weight_mean"] = (
+        float(row_selected[screening.row_cost > 0].mean().item())
+        if valid_keep_prob.numel() > 0
+        else 0.0
+    )
+    return train_data
+
+
 def apply_kondo_mode(
     *,
     train_data: BatchedDataDict[Any],
@@ -571,8 +620,11 @@ def apply_kondo_mode(
     )
 
     if screening.should_bypass:
-        metrics["kondo_bypass_step"] = 1.0
-        return train_data, metrics
+        return _mark_dense_bypass(
+            train_data=train_data,
+            screening=screening,
+            metrics=metrics,
+        ), metrics
 
     reference_selected_tokens = max(screening.total_reference_tokens, 1)
 
@@ -605,23 +657,11 @@ def apply_kondo_mode(
     if float(screening.row_sampling_priority.max().item()) <= 0.0:
         # When the entire batch has zero actor utility, stochastic row dropping
         # only removes KL/stability updates. Fail open to dense GRPO for that step.
-        row_selected = (screening.row_cost > 0).to(dtype=torch.float32)
-        row_keep_prob = torch.zeros_like(
-            train_data["sample_mask"], dtype=torch.float32
-        )
-        row_keep_prob[row_selected > 0] = 1.0
-        train_data["kondo_row_selected"] = row_selected
-        train_data["kondo_row_keep_prob"] = row_keep_prob
-        train_data["kondo_row_ht_weight"] = row_selected
-        metrics["kondo_bypass_step"] = 1.0
-        metrics["kondo_rows_kept"] = float(row_selected.sum().item())
-        metrics["kondo_selected_token_recall"] = 1.0
-        metrics["kondo_selected_token_fraction"] = float(
-            screening.total_reference_tokens / max(screening.total_valid_tokens, 1)
-        )
-        metrics["kondo_actual_backward_token_fraction"] = 1.0
-        metrics["kondo_kept_row_token_fraction"] = 1.0
-        return train_data, metrics
+        return _mark_dense_bypass(
+            train_data=train_data,
+            screening=screening,
+            metrics=metrics,
+        ), metrics
 
     prompt_group_id = train_data.get("prompt_group_id")
     if prompt_group_id is not None:
@@ -651,8 +691,14 @@ def apply_kondo_mode(
             row_cost=screening.row_cost,
         )
     if selected_rows.numel() == 0:
-        metrics["kondo_bypass_step"] = 1.0
-        return train_data, metrics
+        # Empty Bernoulli draws are rare but valid for stochastic row sampling.
+        # Treat them as an explicit dense safety bypass rather than reporting
+        # sparse compute for a full-batch training call.
+        return _mark_dense_bypass(
+            train_data=train_data,
+            screening=screening,
+            metrics=metrics,
+        ), metrics
 
     policy_train_data = train_data.select_indices(selected_rows)
     full_batch_normalizer = torch.full(

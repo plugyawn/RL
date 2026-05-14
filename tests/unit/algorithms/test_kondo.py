@@ -496,6 +496,128 @@ def test_stochastic_response_rows_sets_inverse_propensity_weights(
     assert metrics["kondo_row_ht_weight_mean"] >= 1.0
 
 
+def test_stochastic_response_rows_reports_empty_draw_as_dense_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    train_data = _make_train_data()
+    cfg = resolve_kondo_config(
+        {
+            "enabled": True,
+            "mode": "stochastic_response_rows",
+            "priority_mode": "split_dual_tempered_delight",
+            "target_backward_token_fraction": 0.5,
+            "surprisal_temperature": 1.0,
+            "gate_temperature": 1.0,
+            "positive_keep_floor": 0.9,
+            "negative_keep_floor": 0.25,
+            "min_keep_probability": 0.2,
+        }
+    )
+    screening = screen_kondo_tokens(train_data, cfg)
+    assert screening is not None
+
+    monkeypatch.setattr(
+        "nemo_rl.algorithms.kondo.torch.rand_like",
+        lambda tensor: torch.ones_like(tensor),
+    )
+
+    policy_train_data, metrics = apply_kondo_mode(
+        train_data=train_data,
+        screening=screening,
+        cfg=cfg,
+        row_multiple=1,
+    )
+
+    assert policy_train_data["input_ids"].shape[0] == 3
+    assert "sample_loss_weight" not in policy_train_data
+    torch.testing.assert_close(
+        policy_train_data["kondo_row_selected"],
+        torch.ones(3, dtype=torch.float32),
+    )
+    torch.testing.assert_close(
+        policy_train_data["kondo_row_keep_prob"],
+        torch.ones(3, dtype=torch.float32),
+    )
+    assert metrics["kondo_bypass_step"] == 1.0
+    assert metrics["kondo_rows_kept"] == 3.0
+    assert metrics["kondo_actual_backward_token_fraction"] == 1.0
+    assert metrics["kondo_row_keep_probability_mean"] == 1.0
+
+
+def test_stochastic_response_rows_reports_empty_group_draw_as_dense_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    train_data = BatchedDataDict(
+        {
+            "input_ids": torch.tensor(
+                [[1, 11, 12], [1, 21, 22], [1, 31, 32], [1, 41, 42]],
+                dtype=torch.long,
+            ),
+            "token_mask": torch.tensor(
+                [
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                ]
+            ),
+            "sample_mask": torch.ones(4, dtype=torch.float32),
+            "advantages": torch.tensor(
+                [
+                    [0.0, 3.0, 3.0],
+                    [0.0, -1.0, -1.0],
+                    [0.0, 2.0, 2.0],
+                    [0.0, -2.0, -2.0],
+                ]
+            ),
+            "prev_logprobs": torch.full((4, 3), -1.0),
+            "generation_logprobs": torch.full((4, 3), -1.0),
+            "prompt_group_std": torch.ones(4, dtype=torch.float32),
+            "prompt_group_id": torch.tensor([0, 0, 1, 1], dtype=torch.int64),
+        }
+    )
+    train_data["prev_logprobs"][:, 0] = 0.0
+    train_data["generation_logprobs"][:, 0] = 0.0
+    cfg = resolve_kondo_config(
+        {
+            "enabled": True,
+            "mode": "stochastic_response_rows",
+            "priority_mode": "split_dual_tempered_delight",
+            "target_backward_token_fraction": 0.5,
+            "surprisal_temperature": 1.0,
+            "min_keep_probability": 0.2,
+        }
+    )
+    screening = screen_kondo_tokens(train_data, cfg)
+    assert screening is not None
+
+    monkeypatch.setattr(
+        "nemo_rl.algorithms.kondo.torch.rand",
+        lambda *args, **kwargs: torch.ones(*args, **kwargs),
+    )
+
+    policy_train_data, metrics = apply_kondo_mode(
+        train_data=train_data,
+        screening=screening,
+        cfg=cfg,
+        row_multiple=1,
+    )
+
+    assert policy_train_data["input_ids"].shape[0] == 4
+    assert "sample_loss_weight" not in policy_train_data
+    torch.testing.assert_close(
+        policy_train_data["kondo_row_selected"],
+        torch.ones(4, dtype=torch.float32),
+    )
+    torch.testing.assert_close(
+        policy_train_data["kondo_row_keep_prob"],
+        torch.ones(4, dtype=torch.float32),
+    )
+    assert metrics["kondo_bypass_step"] == 1.0
+    assert metrics["kondo_rows_kept"] == 4.0
+    assert metrics["kondo_actual_backward_token_fraction"] == 1.0
+
+
 def test_clipped_pg_loss_respects_loss_token_mask_and_normalizer():
     cfg = {
         "ratio_clip_min": 0.2,
@@ -578,3 +700,47 @@ def test_clipped_pg_loss_applies_sample_loss_weight():
     )
 
     torch.testing.assert_close(loss, torch.tensor(8.0))
+
+
+def test_clipped_pg_loss_applies_sample_loss_weight_to_kl():
+    cfg = {
+        "ratio_clip_min": 0.2,
+        "ratio_clip_max": 0.2,
+        "ratio_clip_c": None,
+        "disable_ppo_ratio": True,
+        "reference_policy_kl_penalty": 1.0,
+        "reference_policy_kl_type": "k2",
+        "kl_input_clamp_value": None,
+        "kl_output_clamp_value": None,
+        "use_on_policy_kl_approximation": False,
+        "use_importance_sampling_correction": False,
+        "truncated_importance_sampling_ratio": None,
+        "sequence_level_importance_ratios": False,
+        "token_level_loss": True,
+        "force_on_policy_ratio": False,
+    }
+    loss_fn = ClippedPGLossFn(cfg)
+    data = BatchedDataDict(
+        {
+            "input_ids": torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
+            "advantages": torch.zeros((1, 4), dtype=torch.float32),
+            "prev_logprobs": torch.tensor([[0.0, -2.0, -2.0, -2.0]]),
+            "generation_logprobs": torch.tensor([[0.0, -2.0, -2.0, -2.0]]),
+            "reference_policy_logprobs": torch.tensor([[0.0, -1.0, -1.0, -1.0]]),
+            "token_mask": torch.tensor([[0.0, 1.0, 1.0, 1.0]]),
+            "kl_normalizer": torch.tensor([3.0]),
+            "sample_mask": torch.tensor([1.0]),
+            "sample_loss_weight": torch.tensor([2.0]),
+        }
+    )
+    next_token_logprobs = torch.tensor([[-2.0, -2.0, -2.0]])
+
+    loss, metrics = loss_fn(
+        next_token_logprobs=next_token_logprobs,
+        data=data,
+        global_valid_seqs=torch.tensor(1.0),
+        global_valid_toks=torch.tensor(3.0),
+    )
+
+    torch.testing.assert_close(loss, torch.tensor(1.0))
+    assert metrics["kl_penalty"] == pytest.approx(1.0)

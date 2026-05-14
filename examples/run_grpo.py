@@ -84,7 +84,9 @@ def main() -> None:
     assert config["policy"]["generation"] is not None, (
         "A generation config is required for GRPO"
     )
-    has_refit_draft_weights = bool(config["policy"]["draft"]["enabled"])
+    has_refit_draft_weights = bool(
+        config["policy"].get("draft", {}).get("enabled", False)
+    )
     config["policy"]["generation"] = configure_generation_config(
         config["policy"]["generation"],
         tokenizer,

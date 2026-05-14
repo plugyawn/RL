@@ -395,6 +395,8 @@ class ClippedPGLossFn(LossFunction):
                     output_clamp_value=self.kl_output_clamp_value,
                 )
             )
+            if sample_loss_weight is not None:
+                kl = kl * sample_loss_weight
             # Reduce KL loss
             if self.loss_type == LossType.TOKEN_LEVEL:
                 if kl_normalizer is None:
@@ -576,9 +578,9 @@ class ClippedPGLossFn(LossFunction):
         else:
             importance_weights_to_use = torch.ones_like(prev_logprobs)
         if sample_loss_weight is not None:
-            # Row-level Kondo proposals are actor-shaped. Keep the inverse-propensity
-            # correction on the actor term only instead of amplifying KL with the
-            # same sampled-row weights.
+            # Kondo row sampling uses Horvitz-Thompson correction: selected-row
+            # actor and KL contributions are scaled while full-batch normalizers
+            # preserve the dense objective in expectation.
             importance_weights_to_use = importance_weights_to_use * sample_loss_weight
 
         if self.loss_type == LossType.TOKEN_LEVEL:
