@@ -32,7 +32,7 @@ Required environment
 
 Repo and handoff context
 - Repository:
-  - NeMo-RL fork on branch `codex/kondo-v2-neomorl`
+  - NeMo-RL fork on branch `plugyawn/kondo-sparse-grpo-upstream-pr`
 - Suggested server worktree:
   - clone or checkout this exact branch into a dedicated worktree
 - Do not run from:
@@ -57,6 +57,13 @@ What the next agent should know
 - It is a prompt-group-atomic stochastic Kondo variant.
 - It is designed to preserve real row/group-level compute skip before `policy.train(...)`.
 - It is not a token-sparse executor inside kept rows.
+- The current sparse estimator is intended to approximate the dense GRPO+KL objective in expectation:
+  - GRPO advantages are computed before sparse row compaction.
+  - selected rows receive inverse-propensity `sample_loss_weight`.
+  - both actor loss and KL penalty use that row weight with full-batch normalizers.
+  - empty sparse draws and zero-utility batches fail open to dense training with dense compute metrics.
+- The focused local correctness suite is:
+  - `tests/unit/algorithms/test_kondo.py`
 - The primary measured success criterion is:
   - better long-horizon quality than baseline at roughly the same expected Kondo budget
   - without giving back the compute savings
@@ -196,7 +203,6 @@ Known caveats in the current implementation
 - Group sampling is atomic and budgeted in expectation, not exact-budget deterministic.
 - The sparse path still needs close scrutiny on:
   - zero-actor prompt-group handling
-  - KL accounting on sparse steps
   - late-horizon proposer bias
 - Server validation should measure these behaviors; it should not silently patch around them mid-run.
 
